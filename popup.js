@@ -6,6 +6,7 @@ const trimSilenceCb = document.getElementById('trimSilence');
 const autoSaveCb = document.getElementById('autoSave');
 let currentTabId = null;
 let recordingStartTime = null;
+let elapsedInterval = null;
 
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -47,12 +48,32 @@ function loadStatus() {
   });
 }
 
-function formatTime(ms) {
-  const d = new Date(ms);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
-  return `${hh}:${mm}:${ss}`;
+function formatElapsed(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  const p = (n) => String(n).padStart(2, '0');
+  if (h > 0) return `${h}:${p(m)}:${p(s)}`;
+  return `${p(m)}:${p(s)}`;
+}
+
+function startElapsedTimer() {
+  stopElapsedTimer();
+  function tick() {
+    if (recording && recordingStartTime) {
+      timerEl.textContent = formatElapsed(Date.now() - recordingStartTime);
+    }
+  }
+  tick();
+  elapsedInterval = setInterval(tick, 1000);
+}
+
+function stopElapsedTimer() {
+  if (elapsedInterval) {
+    clearInterval(elapsedInterval);
+    elapsedInterval = null;
+  }
 }
 
 function updateUI() {
@@ -64,7 +85,7 @@ function updateUI() {
     trimSilenceCb.disabled = true; // 録音中は変更不可
     autoSaveCb.disabled = true;
     if (recordingStartTime) {
-      timerEl.textContent = `録音開始: ${formatTime(recordingStartTime)}`;
+      startElapsedTimer();
       timerEl.hidden = false;
     }
   } else {
@@ -74,6 +95,7 @@ function updateUI() {
     statusEl.classList.remove('active');
     trimSilenceCb.disabled = false;
     autoSaveCb.disabled = false;
+    stopElapsedTimer();
     timerEl.hidden = true;
   }
 }

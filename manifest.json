@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tab Audio Recorder",
-  "version": "1.1.0",
+  "version": "1.2.1",
   "description": "タブの音声を録音し、WebMファイルとして保存する拡張機能",
   "permissions": [
     "activeTab",

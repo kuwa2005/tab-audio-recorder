@@ -476,3 +476,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
+
+// タブが閉じられたとき、録音中なら自動停止して復旧可能な状態で残す
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  if (!recordings.has(tabId)) return;
+
+  const rec = recordings.get(tabId);
+  stopAnimation(tabId);
+
+  // IndexedDBのチャンクは既に保存済み。status='recording'のまま残すと起動時に復旧UIが出る
+  try {
+    await dbPut('recordings', {
+      tabId,
+      startTime: rec.startTime,
+      trimSilence: rec.trimSilence,
+      autoSave: rec.autoSave,
+      status: 'recording'
+    });
+  } catch (e) {
+    console.error('Failed to save recording state on tab close:', e);
+  }
+
+  recordings.delete(tabId);
+  updateBadges();
+  stopKeepAlive();
+
+  // offscreenに停止を通知（まだ生きていれば）
+  try {
+    chrome.runtime.sendMessage({ type: 'STOP_RECORDING', tabId });
+  } catch (e) {
+    // offscreenが既に死んでいれば無視
+  }
+});
