@@ -1,5 +1,5 @@
 // Offscreen Document - Audio Recording
-// 複数タブ同時録音対応
+// 複数タブ同時録音対応 / 無音トリミング対応
 
 const recorders = new Map(); // tabId -> { mediaRecorder, stream }
 
@@ -11,7 +11,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     stopRecording(msg.tabId).then(() => sendResponse({ ok: true }));
     return true;
   } else if (msg.type === 'CREATE_DOWNLOAD') {
-    createDownloadUrl(msg.tabId, msg.audioBase64);
+    createDownloadUrl(msg.tabId, msg.audioBase64, msg.trimSilence);
     sendResponse({ ok: true });
     return true;
   } else if (msg.type === 'CLEANUP_URL') {
@@ -81,14 +81,116 @@ async function stopRecording(tabId) {
   }
 }
 
-function createDownloadUrl(tabId, base64) {
+// ========== 無音トリミング ==========
+
+function findFirstNonSilentSample(channelData, threshold) {
+  for (let i = 0; i < channelData.length; i++) {
+    if (Math.abs(channelData[i]) > threshold) {
+      return i;
+    }
+  }
+  return -1; // 全て無音
+}
+
+async function trimLeadingSilence(blob, threshold = 0.01) {
+  const audioCtx = new AudioContext();
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+    const channelData = audioBuffer.getChannelData(0);
+    const firstSample = findFirstNonSilentSample(channelData, threshold);
+
+    if (firstSample <= 0) {
+      await audioCtx.close();
+      return blob; // トリミング不要
+    }
+
+    // 0.1秒分のバッファを先頭に追加（トリミング位置の余裕）
+    const sampleRate = audioBuffer.sampleRate;
+    const paddingSamples = Math.floor(sampleRate * 0.1);
+    const startSample = Math.max(0, firstSample - paddingSamples);
+
+    // 新しいバッファを作成
+    const trimmedLength = audioBuffer.length - startSample;
+    const trimmedBuffer = audioCtx.createBuffer(
+      audioBuffer.numberOfChannels,
+      trimmedLength,
+      sampleRate
+    );
+
+    for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+      const src = audioBuffer.getChannelData(ch);
+      const dst = trimmedBuffer.getChannelData(ch);
+      for (let i = 0; i < trimmedLength; i++) {
+        dst[i] = src[startSample + i];
+      }
+    }
+
+    // AudioBuffer → Blob (WebM) に変換
+    const result = await audioBufferToBlob(trimmedBuffer);
+    await audioCtx.close();
+    return result;
+  } catch (e) {
+    console.error('Silence trimming failed, returning original:', e);
+    await audioCtx.close().catch(() => {});
+    return blob;
+  }
+}
+
+function audioBufferToBlob(audioBuffer) {
+  return new Promise((resolve, reject) => {
+    const ctx = new OfflineAudioContext(
+      audioBuffer.numberOfChannels,
+      audioBuffer.length,
+      audioBuffer.sampleRate
+    );
+
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+
+    const dest = ctx.createMediaStreamDestination();
+    source.connect(dest);
+
+    const recorder = new MediaRecorder(dest.stream, {
+      mimeType: 'audio/webm;codecs=opus'
+    });
+    const chunks = [];
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      resolve(new Blob(chunks, { type: 'audio/webm' }));
+    };
+
+    recorder.onerror = (e) => reject(e);
+
+    recorder.start();
+    source.start(0);
+    source.onended = () => {
+      recorder.stop();
+    };
+  });
+}
+
+// ========== ダウンロードURL作成 ==========
+
+async function createDownloadUrl(tabId, base64, trimSilence) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
     bytes[i] = binary.charCodeAt(i);
   }
 
-  const blob = new Blob([bytes], { type: 'audio/webm' });
+  let blob = new Blob([bytes], { type: 'audio/webm' });
+
+  // 無音トリミングが有効な場合
+  if (trimSilence) {
+    blob = await trimLeadingSilence(blob);
+  }
+
   const url = URL.createObjectURL(blob);
   const urlId = `${tabId}_${Date.now()}`;
   blobUrls.push({ id: urlId, url });

@@ -44,8 +44,57 @@ h1 { font-size: 15px; font-weight: 600; color: #fff; }
 .btn-primary:hover { background: #1a4a7a; }
 .btn-primary.active { background: #5a2020; color: #e74c3c; }
 
+.settings {
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: #16213e;
+  border-radius: 6px;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #a0a0a0;
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #4ecca3;
+  cursor: pointer;
+}
+
 .info {
   font-size: 12px;
   color: #888;
   line-height: 1.6;
 }
+
+.recovery {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  background: #3d2a1a;
+  border: 1px solid #e67e22;
+  border-radius: 6px;
+}
+
+.recovery-title {
+  font-size: 12px;
+  color: #e67e22;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.btn-recovery {
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #e67e22;
+  color: #fff;
+  font-size: 12px;
+}
+
+.btn-recovery:hover { background: #d35400; }
+.btn-recovery:disabled { background: #555; color: #999; }

@@ -1,16 +1,97 @@
 // Tab Audio Recorder - Background Service Worker
-// 複数タブ同時録音対応
+// 複数タブ同時録音対応 / IndexedDB永続化 / クラッシュ復旧
 
-const recordings = new Map(); // tabId -> { audioChunks: [], animationInterval, currentFrame }
+const recordings = new Map(); // tabId -> { audioChunks, animationInterval, currentFrame, startTime, trimSilence }
 const TOTAL_FRAMES = 12;
+const DB_NAME = 'tab-audio-recorder-db';
+const DB_VERSION = 1;
+const ALARM_NAME = 'keepalive';
 
-// --- アイコンアニメーション ---
+// ========== IndexedDB ==========
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains('recordings')) {
+        db.createObjectStore('recordings', { keyPath: 'tabId' });
+      }
+      if (!db.objectStoreNames.contains('chunks')) {
+        const store = db.createObjectStore('chunks', { keyPath: 'id', autoIncrement: true });
+        store.createIndex('tabId', 'tabId', { unique: false });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbPut(storeName, data) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).put(data);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbDelete(storeName, key) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbDeleteByIndex(storeName, indexName, value) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readwrite');
+    const idx = tx.objectStore(storeName).index(indexName);
+    const req = idx.openCursor(IDBKeyRange.only(value));
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function dbGetAllByIndex(storeName, indexName, value) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const idx = tx.objectStore(storeName).index(indexName);
+    const req = idx.getAll(value);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbGetAll(storeName) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ========== アイコンアニメーション ==========
+
 function startAnimation(tabId) {
   const rec = recordings.get(tabId);
   if (!rec) return;
-
   rec.currentFrame = 0;
-
   rec.animationInterval = setInterval(() => {
     const frame = rec.currentFrame % TOTAL_FRAMES;
     chrome.action.setIcon({
@@ -41,25 +122,46 @@ function stopAnimation(tabId) {
   });
 }
 
-// --- バッジ更新 ---
+// ========== バッジ更新 ==========
+
 function updateBadges() {
-  // 全タブのバッジをクリア
   chrome.tabs.query({}, (tabs) => {
     tabs.forEach(tab => {
       chrome.action.setBadgeText({ text: '', tabId: tab.id });
     });
   });
-
-  // 録音中のタブにバッジを設定
-  for (const [tabId, rec] of recordings) {
+  for (const [tabId] of recordings) {
     chrome.action.setBadgeText({ text: '●', tabId });
     chrome.action.setBadgeBackgroundColor({ color: '#e74c3c', tabId });
   }
 }
 
-// --- 録音制御 ---
-async function startRecording(tabId) {
-  // 既に録音中の場合はエラー
+// ========== アラームキープアライブ ==========
+
+async function startKeepAlive() {
+  if (recordings.size > 0) {
+    chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.4 }); // ~24秒ごと
+  }
+}
+
+async function stopKeepAlive() {
+  if (recordings.size === 0) {
+    chrome.alarms.clear(ALARM_NAME);
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ALARM_NAME) {
+    // 録音が無くなったらアラームを止める
+    if (recordings.size === 0) {
+      chrome.alarms.clear(ALARM_NAME);
+    }
+  }
+});
+
+// ========== 録音制御 ==========
+
+async function startRecording(tabId, trimSilence) {
   if (recordings.has(tabId)) {
     return { error: 'このタブは既に録音中です' };
   }
@@ -67,11 +169,21 @@ async function startRecording(tabId) {
   try {
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
 
-    // タブごとの録音状態を初期化
-    recordings.set(tabId, {
+    const rec = {
       audioChunks: [],
       animationInterval: null,
-      currentFrame: 0
+      currentFrame: 0,
+      startTime: Date.now(),
+      trimSilence: !!trimSilence
+    };
+    recordings.set(tabId, rec);
+
+    // IndexedDBに録音メタデータを保存
+    await dbPut('recordings', {
+      tabId: tabId,
+      startTime: rec.startTime,
+      trimSilence: rec.trimSilence,
+      status: 'recording'
     });
 
     await setupOffscreen();
@@ -83,6 +195,7 @@ async function startRecording(tabId) {
 
     updateBadges();
     startAnimation(tabId);
+    startKeepAlive();
 
     return { ok: true };
   } catch (err) {
@@ -95,6 +208,18 @@ async function stopRecording(tabId) {
     return { error: 'このタブは録音されていません' };
   }
 
+  // ステータスを finalizing に更新
+  try {
+    await dbPut('recordings', {
+      tabId,
+      startTime: recordings.get(tabId).startTime,
+      trimSilence: recordings.get(tabId).trimSilence,
+      status: 'finalizing'
+    });
+  } catch (e) {
+    console.error('Failed to update recording status:', e);
+  }
+
   stopAnimation(tabId);
   chrome.runtime.sendMessage({ type: 'STOP_RECORDING', tabId: tabId });
 
@@ -103,6 +228,12 @@ async function stopRecording(tabId) {
 
 async function stopAllRecordings() {
   for (const tabId of recordings.keys()) {
+    await dbPut('recordings', {
+      tabId,
+      startTime: recordings.get(tabId).startTime,
+      trimSilence: recordings.get(tabId).trimSilence,
+      status: 'finalizing'
+    });
     stopAnimation(tabId);
     chrome.runtime.sendMessage({ type: 'STOP_RECORDING', tabId: tabId });
   }
@@ -121,8 +252,9 @@ async function setupOffscreen() {
   }
 }
 
-// タブごとの音声チャンクを保存
-function saveAudioChunk(tabId, chunkBase64) {
+// ========== チャンク保存 (メモリ + IndexedDB) ==========
+
+async function saveAudioChunk(tabId, chunkBase64) {
   const rec = recordings.get(tabId);
   if (!rec) return;
 
@@ -132,18 +264,33 @@ function saveAudioChunk(tabId, chunkBase64) {
     bytes[i] = binary.charCodeAt(i);
   }
   rec.audioChunks.push(bytes);
+
+  // IndexedDBにも即座に保存（クラッシュ復旧用）
+  try {
+    const chunkCount = rec.audioChunks.length;
+    await dbPut('chunks', {
+      tabId: tabId,
+      index: chunkCount - 1,
+      data: bytes,
+      timestamp: Date.now()
+    });
+  } catch (e) {
+    console.error('Failed to persist chunk to IndexedDB:', e);
+  }
 }
 
-// タブごとの録音完了 → ダウンロード
+// ========== 録音完了 → ダウンロード ==========
+
 async function finalizeRecording(tabId) {
   const rec = recordings.get(tabId);
   if (!rec || rec.audioChunks.length === 0) {
     recordings.delete(tabId);
+    await cleanupRecordingDB(tabId);
     updateBadges();
+    stopKeepAlive();
     return;
   }
 
-  // 全チャンクを結合
   const totalLength = rec.audioChunks.reduce((sum, chunk) => sum + chunk.length, 0);
   const merged = new Uint8Array(totalLength);
   let offset = 0;
@@ -151,20 +298,92 @@ async function finalizeRecording(tabId) {
     merged.set(chunk, offset);
     offset += chunk.length;
   }
-  rec.audioChunks = [];
 
-  // Base64に変換してOffscreenに送信
+  const trimSilence = rec.trimSilence;
+  recordings.delete(tabId);
+  await cleanupRecordingDB(tabId);
+  updateBadges();
+  stopKeepAlive();
+
+  // Base64に変換してOffscreenに送信（無音トリミング設定を渡す）
   const base64 = arrayBufferToBase64(merged.buffer);
   chrome.runtime.sendMessage({
     type: 'CREATE_DOWNLOAD',
     tabId: tabId,
-    audioBase64: base64
+    audioBase64: base64,
+    trimSilence: trimSilence
   });
-
-  // 録音状態を削除
-  recordings.delete(tabId);
-  updateBadges();
 }
+
+async function cleanupRecordingDB(tabId) {
+  try {
+    await dbDelete('recordings', tabId);
+    await dbDeleteByIndex('chunks', 'tabId', tabId);
+  } catch (e) {
+    console.error('Failed to cleanup IndexedDB:', e);
+  }
+}
+
+// ========== クラッシュ復旧 ==========
+
+async function getRecoverableRecordings() {
+  try {
+    const all = await dbGetAll('recordings');
+    return all.filter(r => r.status === 'recording' || r.status === 'finalizing');
+  } catch (e) {
+    return [];
+  }
+}
+
+async function recoverRecording(tabId) {
+  try {
+    // IndexedDBからチャンクを読み込み
+    const chunks = await dbGetAllByIndex('chunks', 'tabId', tabId);
+    if (chunks.length === 0) return { error: '復旧データが見つかりません' };
+
+    // インデックス順にソート
+    chunks.sort((a, b) => a.index - b.index);
+
+    const totalLength = chunks.reduce((sum, c) => sum + c.data.length, 0);
+    const merged = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const c of chunks) {
+      merged.set(c.data, offset);
+      offset += c.data.length;
+    }
+
+    // メタデータを取得
+    const meta = await new Promise(async (resolve) => {
+      try {
+        const db = await openDB();
+        const tx = db.transaction('recordings', 'readonly');
+        const req = tx.objectStore('recordings').get(tabId);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch { resolve(null); }
+    });
+
+    const trimSilence = meta?.trimSilence ?? false;
+
+    // クリーンアップ
+    await cleanupRecordingDB(tabId);
+
+    // ダウンロード
+    const base64 = arrayBufferToBase64(merged.buffer);
+    chrome.runtime.sendMessage({
+      type: 'CREATE_DOWNLOAD',
+      tabId: tabId,
+      audioBase64: base64,
+      trimSilence: trimSilence
+    });
+
+    return { ok: true };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+// ========== ユーティリティ ==========
 
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -175,9 +394,11 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+// ========== メッセージリスナー ==========
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'START_RECORDING') {
-    startRecording(msg.tabId).then(res => sendResponse(res));
+    startRecording(msg.tabId, msg.trimSilence).then(res => sendResponse(res));
     return true;
   }
 
@@ -192,22 +413,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'GET_STATUS') {
-    // 現在のタブが録音中かを返す
-    const tabId = msg.tabId;
-    sendResponse({ isRecording: recordings.has(tabId) });
+    sendResponse({ isRecording: recordings.has(msg.tabId) });
     return true;
   }
 
   if (msg.type === 'GET_ALL_RECORDINGS') {
-    // 全録音中タブのリストを返す
     const list = Array.from(recordings.keys()).map(id => ({ tabId: id }));
     sendResponse({ recordings: list });
     return true;
   }
 
   if (msg.type === 'AUDIO_CHUNK') {
-    saveAudioChunk(msg.tabId, msg.chunk);
-    sendResponse({ ok: true });
+    saveAudioChunk(msg.tabId, msg.chunk).then(() => sendResponse({ ok: true }));
     return true;
   }
 
@@ -216,10 +433,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // OffscreenからダウンロードURLを受信
   if (msg.type === 'DOWNLOAD_READY') {
     const now = new Date();
-    const filename = `recording_tab${msg.tabId}_${now.toISOString().slice(0,10)}_${now.toTimeString().slice(0,8).replace(/:/g,'')}.webm`;
+    const filename = `recording_tab${msg.tabId}_${now.toISOString().slice(0, 10)}_${now.toTimeString().slice(0, 8).replace(/:/g, '')}.webm`;
     chrome.downloads.download({
       url: msg.url,
       filename: filename,
@@ -228,6 +444,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       chrome.runtime.sendMessage({ type: 'CLEANUP_URL', urlId: msg.urlId });
     });
     sendResponse({ ok: true });
+    return true;
+  }
+
+  // 復旧関連
+  if (msg.type === 'GET_RECOVERABLE') {
+    getRecoverableRecordings().then(recordings => {
+      sendResponse({ recordings });
+    });
+    return true;
+  }
+
+  if (msg.type === 'RECOVER_RECORDING') {
+    recoverRecording(msg.tabId).then(res => sendResponse(res));
     return true;
   }
 });
