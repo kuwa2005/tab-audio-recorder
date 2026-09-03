@@ -210,6 +210,9 @@ async function stopRecording(tabId) {
     return { error: 'このタブは録音されていません' };
   }
 
+  // アニメーションを即座に停止（ユーザーに最も早いフィードバック）
+  stopAnimation(tabId);
+
   // ステータスを finalizing に更新
   try {
     await dbPut('recordings', {
@@ -223,7 +226,6 @@ async function stopRecording(tabId) {
     console.error('Failed to update recording status:', e);
   }
 
-  stopAnimation(tabId);
   chrome.runtime.sendMessage({ type: 'STOP_RECORDING', tabId: tabId });
 
   return { ok: true };

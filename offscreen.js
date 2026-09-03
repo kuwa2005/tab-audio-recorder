@@ -76,8 +76,18 @@ async function startRecording(tabId, streamId) {
 
 async function stopRecording(tabId) {
   const rec = recorders.get(tabId);
-  if (rec && rec.mediaRecorder.state !== 'inactive') {
+  if (!rec) return;
+
+  if (rec.mediaRecorder.state !== 'inactive') {
     rec.mediaRecorder.stop();
+  } else {
+    // mediaRecorderは既に停止済みだが、ストリームトラックが残っている場合のフォールバック
+    rec.stream.getTracks().forEach(t => t.stop());
+    recorders.delete(tabId);
+    chrome.runtime.sendMessage({
+      type: 'FINALIZE_RECORDING',
+      tabId: tabId
+    });
   }
 }
 
