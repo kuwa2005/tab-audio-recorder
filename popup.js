@@ -1,8 +1,11 @@
 let recording = false;
 const recordBtn = document.getElementById('recordBtn');
 const statusEl = document.getElementById('status');
+const timerEl = document.getElementById('timer');
 const trimSilenceCb = document.getElementById('trimSilence');
+const autoSaveCb = document.getElementById('autoSave');
 let currentTabId = null;
+let recordingStartTime = null;
 
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -12,12 +15,16 @@ async function init() {
   }
 
   // チェックボックス状態を復元
-  const { trimSilence } = await chrome.storage.local.get('trimSilence');
+  const { trimSilence, autoSave } = await chrome.storage.local.get(['trimSilence', 'autoSave']);
   trimSilenceCb.checked = !!trimSilence;
+  autoSaveCb.checked = !!autoSave;
 
   // チェックボックス変更時に保存
   trimSilenceCb.addEventListener('change', () => {
     chrome.storage.local.set({ trimSilence: trimSilenceCb.checked });
+  });
+  autoSaveCb.addEventListener('change', () => {
+    chrome.storage.local.set({ autoSave: autoSaveCb.checked });
   });
 }
 
@@ -27,6 +34,7 @@ function loadStatus() {
   chrome.runtime.sendMessage({ type: 'GET_STATUS', tabId: currentTabId }, (res) => {
     if (res) {
       recording = res.isRecording;
+      recordingStartTime = res.startTime || null;
       updateUI();
     }
   });
@@ -39,6 +47,14 @@ function loadStatus() {
   });
 }
 
+function formatTime(ms) {
+  const d = new Date(ms);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+}
+
 function updateUI() {
   if (recording) {
     recordBtn.textContent = '録音停止';
@@ -46,12 +62,19 @@ function updateUI() {
     statusEl.textContent = '🔴 録音中';
     statusEl.classList.add('active');
     trimSilenceCb.disabled = true; // 録音中は変更不可
+    autoSaveCb.disabled = true;
+    if (recordingStartTime) {
+      timerEl.textContent = `録音開始: ${formatTime(recordingStartTime)}`;
+      timerEl.hidden = false;
+    }
   } else {
     recordBtn.textContent = '録音開始';
     recordBtn.classList.remove('active');
     statusEl.textContent = '準備完了';
     statusEl.classList.remove('active');
     trimSilenceCb.disabled = false;
+    autoSaveCb.disabled = false;
+    timerEl.hidden = true;
   }
 }
 
@@ -90,12 +113,12 @@ recordBtn.addEventListener('click', async () => {
   if (!currentTabId) return;
 
   if (!recording) {
-    // trimSilenceの設定を取得して送信
-    const { trimSilence } = await chrome.storage.local.get('trimSilence');
+    const { trimSilence, autoSave } = await chrome.storage.local.get(['trimSilence', 'autoSave']);
     chrome.runtime.sendMessage({
       type: 'START_RECORDING',
       tabId: currentTabId,
-      trimSilence: !!trimSilence
+      trimSilence: !!trimSilence,
+      autoSave: !!autoSave
     }, (res) => {
       if (res?.error) {
         statusEl.textContent = res.error;
@@ -103,12 +126,14 @@ recordBtn.addEventListener('click', async () => {
         setTimeout(() => { statusEl.style.color = ''; }, 2000);
       } else {
         recording = true;
+        recordingStartTime = Date.now();
         updateUI();
       }
     });
   } else {
     chrome.runtime.sendMessage({ type: 'STOP_RECORDING', tabId: currentTabId }, () => {
       recording = false;
+      recordingStartTime = null;
       updateUI();
     });
   }

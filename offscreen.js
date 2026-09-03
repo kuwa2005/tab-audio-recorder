@@ -11,7 +11,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     stopRecording(msg.tabId).then(() => sendResponse({ ok: true }));
     return true;
   } else if (msg.type === 'CREATE_DOWNLOAD') {
-    createDownloadUrl(msg.tabId, msg.audioBase64, msg.trimSilence);
+    createDownloadUrl(msg.tabId, msg.audioBase64, msg.trimSilence, msg.autoSave);
     sendResponse({ ok: true });
     return true;
   } else if (msg.type === 'CLEANUP_URL') {
@@ -177,7 +177,7 @@ function audioBufferToBlob(audioBuffer) {
 
 // ========== ダウンロードURL作成 ==========
 
-async function createDownloadUrl(tabId, base64, trimSilence) {
+async function createDownloadUrl(tabId, base64, trimSilence, autoSave) {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
@@ -199,7 +199,8 @@ async function createDownloadUrl(tabId, base64, trimSilence) {
     type: 'DOWNLOAD_READY',
     tabId: tabId,
     url: url,
-    urlId: urlId
+    urlId: urlId,
+    autoSave: !!autoSave
   });
 }
 

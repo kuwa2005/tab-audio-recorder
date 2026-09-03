@@ -60,6 +60,10 @@ h1 { font-size: 15px; font-weight: 600; color: #fff; }
   cursor: pointer;
 }
 
+.checkbox-label + .checkbox-label {
+  margin-top: 8px;
+}
+
 .checkbox-label input[type="checkbox"] {
   width: 14px;
   height: 14px;

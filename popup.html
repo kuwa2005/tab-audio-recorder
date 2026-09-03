@@ -12,6 +12,8 @@
       <div class="status" id="status">準備完了</div>
     </header>
 
+    <div class="timer" id="timer" hidden>録音開始: --:--:--</div>
+
     <div class="controls">
       <button id="recordBtn" class="btn btn-primary">録音開始</button>
     </div>
@@ -20,6 +22,10 @@
       <label class="checkbox-label">
         <input type="checkbox" id="trimSilence">
         <span>保存時に無音部分をスキップ</span>
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="autoSave">
+        <span>録音停止時に保存先を聞かず自動ダウンロード</span>
       </label>
     </div>
 

@@ -161,7 +161,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 // ========== 録音制御 ==========
 
-async function startRecording(tabId, trimSilence) {
+async function startRecording(tabId, trimSilence, autoSave) {
   if (recordings.has(tabId)) {
     return { error: 'このタブは既に録音中です' };
   }
@@ -174,7 +174,8 @@ async function startRecording(tabId, trimSilence) {
       animationInterval: null,
       currentFrame: 0,
       startTime: Date.now(),
-      trimSilence: !!trimSilence
+      trimSilence: !!trimSilence,
+      autoSave: !!autoSave
     };
     recordings.set(tabId, rec);
 
@@ -183,6 +184,7 @@ async function startRecording(tabId, trimSilence) {
       tabId: tabId,
       startTime: rec.startTime,
       trimSilence: rec.trimSilence,
+      autoSave: rec.autoSave,
       status: 'recording'
     });
 
@@ -214,6 +216,7 @@ async function stopRecording(tabId) {
       tabId,
       startTime: recordings.get(tabId).startTime,
       trimSilence: recordings.get(tabId).trimSilence,
+      autoSave: recordings.get(tabId).autoSave,
       status: 'finalizing'
     });
   } catch (e) {
@@ -232,6 +235,7 @@ async function stopAllRecordings() {
       tabId,
       startTime: recordings.get(tabId).startTime,
       trimSilence: recordings.get(tabId).trimSilence,
+      autoSave: recordings.get(tabId).autoSave,
       status: 'finalizing'
     });
     stopAnimation(tabId);
@@ -300,18 +304,20 @@ async function finalizeRecording(tabId) {
   }
 
   const trimSilence = rec.trimSilence;
+  const autoSave = rec.autoSave;
   recordings.delete(tabId);
   await cleanupRecordingDB(tabId);
   updateBadges();
   stopKeepAlive();
 
-  // Base64に変換してOffscreenに送信（無音トリミング設定を渡す）
+  // Base64に変換してOffscreenに送信（無音トリミング・自動保存設定を渡す）
   const base64 = arrayBufferToBase64(merged.buffer);
   chrome.runtime.sendMessage({
     type: 'CREATE_DOWNLOAD',
     tabId: tabId,
     audioBase64: base64,
-    trimSilence: trimSilence
+    trimSilence: trimSilence,
+    autoSave: autoSave
   });
 }
 
@@ -364,6 +370,7 @@ async function recoverRecording(tabId) {
     });
 
     const trimSilence = meta?.trimSilence ?? false;
+    const autoSave = meta?.autoSave ?? false;
 
     // クリーンアップ
     await cleanupRecordingDB(tabId);
@@ -374,7 +381,8 @@ async function recoverRecording(tabId) {
       type: 'CREATE_DOWNLOAD',
       tabId: tabId,
       audioBase64: base64,
-      trimSilence: trimSilence
+      trimSilence: trimSilence,
+      autoSave: autoSave
     });
 
     return { ok: true };
@@ -394,11 +402,19 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+// ローカル時刻の YYYYMMDDHHMMSS 形式
+function timestampForFilename() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+         `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
 // ========== メッセージリスナー ==========
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'START_RECORDING') {
-    startRecording(msg.tabId, msg.trimSilence).then(res => sendResponse(res));
+    startRecording(msg.tabId, msg.trimSilence, msg.autoSave).then(res => sendResponse(res));
     return true;
   }
 
@@ -413,7 +429,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'GET_STATUS') {
-    sendResponse({ isRecording: recordings.has(msg.tabId) });
+    const rec = recordings.get(msg.tabId);
+    sendResponse({ isRecording: !!rec, startTime: rec ? rec.startTime : null });
     return true;
   }
 
@@ -434,12 +451,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'DOWNLOAD_READY') {
-    const now = new Date();
-    const filename = `recording_tab${msg.tabId}_${now.toISOString().slice(0, 10)}_${now.toTimeString().slice(0, 8).replace(/:/g, '')}.webm`;
+    const filename = `tab${msg.tabId}_${timestampForFilename()}.webm`;
     chrome.downloads.download({
       url: msg.url,
       filename: filename,
-      saveAs: true
+      saveAs: !msg.autoSave // 自動保存ONならダイアログを出さず即保存
     }, () => {
       chrome.runtime.sendMessage({ type: 'CLEANUP_URL', urlId: msg.urlId });
     });
